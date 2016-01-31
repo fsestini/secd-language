@@ -1,7 +1,7 @@
---INTERPRETE SECD COMPLETO in Haskell
 module Interpreter(
-interpreter,
-RValue(..),
+  interpreter,
+  run,
+  RValue(..),
 ) where
 
 import Compiler
@@ -9,35 +9,22 @@ import SyntaxAnalyzer
 import Lexer
 import Debug.Trace
 
--- tipo che modella gli R-valori delle variabili. Si tratta dei valori da
--- mettere nella pila S e nell'ambiente dinamico E.
-data RValue = V LKC
-            | OGA -- environment placeholder
+-- Values that are found in the Stack and Environment registers
+data RValue = V LKC                     -- simple value
+            | OGA                       -- environment placeholder
             | CLO [Secdexpr] [[RValue]] -- closures
-            | ValueList [RValue] -- list of values
+            | ValueList [RValue]        -- list
             deriving(Show,Eq)
 
--- datatype dei valori del Dump
-data DumpValue = CONTR  [Secdexpr]
-               | TRIPLA [RValue] [[RValue]] [Secdexpr]
-               | DUMMY deriving(Show,Eq)
+-- Values that are found in the Dump register
+data DumpValue = CONTR  [Secdexpr]              -- piece of Control register
+               | TRIPLA [RValue] [[RValue]] [Secdexpr] -- triple (S E C)
+               deriving(Show,Eq)
 
 type Stack = [RValue]
-type ActivationRecord = [RValue]
-type Environment = [ActivationRecord]
+type Environment = [[RValue]]
 type Dump = [DumpValue]
-
--- funzione che crea l'ambiente dinamico ricorsivo necessario per il
--- trattamento della ricorsione. Serve nel caso Rap
-lazyE :: [RValue] -> [RValue] -> [RValue]
-lazyE [] _ = []
-lazyE (a:b) c = (lazyClo a c):(lazyE b c)
-
-lazyClo :: RValue -> [RValue] -> RValue
-lazyClo (CLO a b) c = (CLO a ((lazyE c c):b))
-lazyClo (V x) _ = (V x)
-lazyClo (ValueList x) _ = (ValueList x)
-lazyClo x _ = error ("LazyClo trova valore incompatibile" ++ (show x))
+type Control = [Secdexpr]
 
 -- funzioni per la ricerca degli R-valori dati i loro indirizzi: usate da Ld
 index :: Integer -> [a] -> a
@@ -45,56 +32,59 @@ index n s = if n == 0
             then head s
             else index (n-1) (tail s)
 
+-- Locate the value stored in the b-th slot of the a-th activation record
 locate :: (Integer, Integer) -> Environment -> RValue
 locate (a,b) e = index b (index a e)
 
 extractInt (V (NUM x)) = x
-extractInt x = error ("trovato altro da intero" ++ (show x))
+extractInt x = error ("found not a number: " ++ (show x))
 
--- funzioni per le liste di Valori ValueList
+-- List operations on ValueList
+vhead :: RValue -> RValue
 vhead (ValueList (a:b)) = a
-vhead (ValueList [])  = error "vhead trovata lista vuota"
-vhead _ = error "vhead non trova ValueList"
+vhead (ValueList [])  = error "vhead found empty list"
+vhead _ = error "vhead found not ValueList"
 
+vtail :: RValue -> RValue
 vtail (ValueList (a:b)) = ValueList b
-vtail (ValueList [])  = error "vtail trovata lista vuota";
-vtail _ = error "vtail non trova ValueList"
+vtail (ValueList [])  = error "vtail found empty list";
+vtail _ = error "vtail found not ValueList"
 
-vatom (V k)= V (BOO True)
+-- Check if a value is an atom
+vatom :: RValue -> RValue
+vatom (V k) = V (BOO True)
 vatom _ = V (BOO False)
 
+-- Encapsulate a bool in an LKC value
 boolAsLkc :: Bool -> LKC
 boolAsLkc b = if b then (BOO True) else (BOO False)
 
--- test di uguaglianza per il tipo RValue, si adatta ai tipi dei parametri con
--- cui é invocata
+-- Equality test between RValues
 eqRValue :: RValue -> RValue -> Bool
 eqRValue a@(V _) b = (eqV a b)
 eqRValue a@(ValueList _) b = (eqVLISTA a b)
-eqRValue a  b = error ("uguaglianza tra chiusure"++ (show a) ++ (show b))
+eqRValue a b = error ("invalid equality test between closures"
+                      ++ (show a) ++ (show b))
 
+-- Equality test between ValueList
 eqVLISTA::RValue -> RValue ->Bool
 eqVLISTA (ValueList []) (ValueList [])= True
-eqVLISTA (ValueList(a:b)) (ValueList (c:d)) = (eqRValue a c) && (eqVLISTA (ValueList b) (ValueList d))
-eqVLISTA _ _= False
+eqVLISTA (ValueList(a:b)) (ValueList (c:d)) =
+    (eqRValue a c) && (eqVLISTA (ValueList b) (ValueList d))
+eqVLISTA _ _ = False
 
-eqV (V a) (V b)= a==b
-eqV _ _= False
+-- Equality test between atoms
+eqV (V a) (V b) = a == b
+eqV _ _ = False
 
-
---FUNZIONE PRINCIPALE   *)
-
-l = [CLO [Rtn] []]
-lazy = lazyE l l
-lazyEnv = [lazy]
-
-interpreter:: Stack -> Environment -> [Secdexpr] -> Dump -> RValue
-interpreter s e ((Ld (b, n)):c) d = let icst = locate (0,0) lazyEnv
-                                        x    = locate (b,n) e
+-- Main function
+interpreter:: Stack -> Environment -> Control -> Dump -> RValue
+interpreter s e ((Ld (b, n)):c) d = let x = locate (b,n) e
                                     in interpreter (x:s) e c d
-interpreter s e ((Ldc k):c) d = trace ("Ldc: " ++ (show k)) $ case k of
-    NIL -> (interpreter ((ValueList []):s) e c d)
-    _   -> (interpreter ((V k):s) e c d)
+interpreter s e ((Ldc k):c) d =
+    case k of
+        NIL -> (interpreter ((ValueList []):s) e c d)
+        _   -> (interpreter ((V k):s) e c d)
 interpreter (x:y:s) e (Add:c) d = let op1 = extractInt x
                                       op2 = extractInt y
                                   in (interpreter ((V (NUM (op1 + op2))):s) e c d)
@@ -117,58 +107,35 @@ interpreter (x:y:s) e (Eq:c) d = interpreter ((V (BOO (eqRValue x y))):s) e c d
 interpreter (l@(ValueList _):s) e (Car:c) d = interpreter ((vhead l):s) e c d
 interpreter (l@(ValueList _):s) e (Cdr:c) d = interpreter ((vtail l):s) e c d
 interpreter (x:(ValueList l):s) e (Cons:c) d =
-    trace "Cons" $ interpreter ((ValueList (x:l)):s) e c d
+    interpreter ((ValueList (x:l)):s) e c d
 interpreter (x:s) e (Atom:c) d = interpreter ((vatom x):s) e c d
-interpreter (b:s) e ((Sel c1 c2):c) d = case b of
-    (V (BOO True))  -> (interpreter s e c1 ((CONTR c):d))
-    (V (BOO False)) -> (interpreter s e c2 ((CONTR c):d))
+interpreter (b:s) e ((Sel c1 c2):c) d =
+    case b of
+        (V (BOO True))  -> (interpreter s e c1 ((CONTR c):d))
+        (V (BOO False)) -> (interpreter s e c2 ((CONTR c):d))
 interpreter s e (Join:_) ((CONTR c):d) = interpreter s e c d
 interpreter s e ((Ldf code):c) d = interpreter ((CLO code e):s) e c d
 interpreter (x:_) _ (Rtn:_) ((TRIPLA s e c):d) = interpreter (x:s) e c d
 interpreter s e (Push:c) d = interpreter s ([OGA]:e) c d
 interpreter (x:s) _ (Stop:_) _ = x
 interpreter ((CLO fCode fEnv):(ValueList l):s) e (Ap:c) d =
-    trace "Ap" $ interpreter [] (l:fEnv) fCode ((TRIPLA s e c):d)
-interpreter ((CLO fCode ([OGA]:fEnv)):(ValueList l):s) e (Rap:c) d =
-    trace "Rap" $ interpreter [] ((lazyE l l):fEnv) fCode ((TRIPLA s (tail e) c):d)
+    interpreter [] (l:fEnv) fCode ((TRIPLA s e c):d)
+interpreter ((CLO letrecBody ([OGA]:fEnv)):(ValueList l):s) e (Rap:c) d =
+    interpreter [] ((lazyE l l):fEnv) letrecBody ((TRIPLA s (tail e) c):d)
 interpreter _ _ _ _ = error "Incoherent state"
 
--- per facilitare l'uso di interpreter
--- se x e'  programma Secdexpr da eseguire. Si aggiunge Stop alla fine.
-fin :: [Secdexpr] -> RValue
-fin x = interpreter [] [] (x ++ [Stop]) []
+lazyE :: [RValue] -> [RValue] -> [RValue]
+lazyE [] _ = []
+lazyE (a:b) c = (lazyClo a c):(lazyE b c)
+
+lazyClo :: RValue -> [RValue] -> RValue
+lazyClo (CLO a ([OGA]:b)) c = (CLO a ((lazyE c c):b))
+lazyClo (V x) _ = (V x)
+lazyClo (ValueList x) _ = (ValueList x)
+lazyClo x _ = error ("LazyClo found incompatible value " ++ (show x))
 
 run :: String -> RValue
-run text = let lexed = lexi text
-               (Return (_, lkced)) = prog lexed
-               compiled = compile lkced
-           in fin compiled
-
--- Mostra che si puo' usare letrec anche con binders non-funzionali.
--- Le var a sinistra non devono apparire a destra
-
-e = "let z=2 in letrec x= 2+z and y= 2*z in x*y*z end end $"
-ee = let z=2 in let x = 2+z
-                    y = 2*z
-                in x*y*z
-
--- distribuisce FACT su una lista di interi *)
-
-sss = "letrec FACT = lambda (X) if eq(X, 0) then 1 else X * FACT(X-1) \
-     \ and G = lambda(H L) if eq(nil, L) then L else cons(H(car(L)), G(H, cdr(L))) \
-     \ in G(FACT, cons(6, cons(7, cons(8, nil)))) end $"
-
--- (*considera liste di liste Z e produce una lista semplice che contiene tanti
--- interi quante sono le liste contenute in Z e l'intero
--- corrispondente ad una lista contenuta in Z  la somma dei fattoriali dei suoi
--- elementi: f2=fattoriale, f1=calcola somma dei fattori--ali degli elementi di
--- una lista di interi e f0 distribuisce f1 sulle liste contenute in Z *)
-
-f="letrec f0 = lambda ( x ) letrec f1 = lambda(y) letrec f2=lambda (z) if eq(z , 1) then 1 else z * f2( z - 1 ) in if eq( y , nil ) then 0 else f2 ( car ( y ) ) + f1 ( cdr (y)) end in if eq(x , nil) then nil else cons (f1 ( car ( x )),f0 ( cdr ( x ) ) ) end in f0( cons (cons (3 , cons (3 , nil)), cons( cons (3 , nil), nil))) end $"
-
-
---(* esempio di funzione che restituisce una funzione locale *)
-
-g="let f1 = lambda() letrec f2 = lambda (z) if eq(z, 1) then 1 else z*f2(z-1) \
-                          \ in f2 end \
- \ in let x = f1() in x(8) end end $"
+run source = let lexed = lexi source
+                 (Return (_, lkced)) = prog lexed
+                 compiled = compile lkced
+             in interpreter [] [] (compiled ++ [Stop]) []

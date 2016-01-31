@@ -1,0 +1,5 @@
+dist/
+*.aux
+*.pdf
+*.hi
+*.o

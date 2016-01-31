@@ -62,40 +62,46 @@ toSymbol c = case c of
 
 -- State N: numeral recognition
 -- n input numero segno :: token (resto dell'input)
-n :: String -> Integer -> Bool -> (Token, String)
-n "" _ _ = error "Unexpected end of string"
-n input@(c:l) num sign
+stateN :: Integer -> Bool -> String -> (Token, String)
+stateN _ _ "" = error "Unexpected end of string"
+stateN soFar sign input@(c:l)
     | isDigitChar c = let d = read [c] :: Integer
-                      in n l (num * 10 + d) sign
-    | otherwise = (Number((if sign then -1 else 1) * num), input)
+                      in stateN (soFar * 10 + d) sign l
+    | otherwise = (Number((if sign then -1 else 1) * soFar), input)
 
 -- State SC: string recognition
 -- sc input current :: token (resto dell'input)
-sc :: String -> String -> (Token, String)
-sc "" _ = error "Unexpected end of input"
-sc ('"':xs) current = (String current, xs)
-sc (x:xs) current = sc xs (current ++ [x])
+stateSC :: String -> String -> (Token, String)
+stateSC _ "" = error "Unexpected end of input"
+stateSC current ('"':xs) = (String current, xs)       -- end scanning at "
+stateSC current (x:xs) = stateSC (current ++ [x]) xs  -- continue scanning
 
 -- State S: identifier, operator and keyword recognition
-s :: String -> String -> (Token, String)
-s "" _ = error "Unexpected end of input"
-s input@(x:xs) current
-    | isIdChar x = s xs (current ++ [x])
+-- stateS :: scannedSoFar -> toScan -> (result, remaining string)
+stateS :: String -> String -> (Token, String)
+stateS _ "" = error "Unexpected end of input"
+stateS current input@(x:xs)
+    | isIdChar x = stateS (current ++ [x]) xs
     | otherwise = (extractWord current, input)
 
-i :: String -> [Token]
-i "" = error "Unexpected end of input"
-i "$" = [(Symbol DOLLAR)]
-i (' ':xs) = i xs
-i input@(x:xs)
-    | isSymbol x = (Symbol (toSymbol x)) : i xs
-    | x == '~'      = let (token, newInput) = n xs 0 True in token : i newInput
-    | isDigitChar x = let (token, newInput) = n xs (read [x] :: Integer) False
-                      in token : i newInput
-    | isAlphaChar x = let (token, newInput) = s xs [x] in token : i newInput
-    | x == '"'      = let (token, newInput) = sc xs "" in token : i newInput
-    | isSpace x     = i xs
+-- main state of the automaton
+-- stateI :: string to scan -> resulting tokens
+stateI :: String -> [Token]
+stateI "" = error "Unexpected end of input"
+stateI "$" = [(Symbol DOLLAR)]
+stateI (' ':xs) = stateI xs   -- ignore spaces
+stateI input@(x:xs)
+    | isSymbol x    = (Symbol (toSymbol x)) : stateI xs
+    | x == '~'      = let (token, newInput) = stateN 0 True xs
+                      in token : stateI newInput
+    | isDigitChar x = let (token, newInput) = stateN (read [x] :: Integer) False xs
+                      in token : stateI newInput
+    | isAlphaChar x = let (token, newInput) = stateS [x] xs
+                      in token : stateI newInput
+    | x == '"'      = let (token, newInput) = stateSC "" xs
+                      in token : stateI newInput
+    | isSpace x     = stateI xs
     | otherwise     = error "Bad string"
 
 lexi :: String -> [Token]
-lexi = i
+lexi = stateI

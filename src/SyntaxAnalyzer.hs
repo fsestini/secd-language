@@ -20,12 +20,14 @@ data LKC = ETY --segnala epsilon productions
 type Exception = String
 data Exc a = Raise Exception | Return a
 
+type Parser a = [Token] -> Exc ([Token], a)
+
 instance Show a => Show (Exc a) where
-    show (Raise e)= "Syntax error: " ++ e
+    show (Raise e)  = "Syntax error: " ++ e
     show (Return x) = "Ok."
 
 instance Functor Exc where
-    fmap _ (Raise e) = Raise e
+    fmap _ (Raise e)  = Raise e
     fmap f (Return x) = Return (f x)
 
 instance Applicative Exc where
@@ -33,60 +35,44 @@ instance Applicative Exc where
     (Return f) <*> (Return x) = Return (f x)
 
 instance Monad Exc where
-    return            = Return
-    (Raise e)  >>= q  = Raise e
-    (Return x) >>= q  = q x
+    return           = Return
+    (Raise e)  >>= q = Raise e
+    (Return x) >>= q = q x
 
 {- Utility match functions -}
-matchLet :: [Token] -> Exc [Token]
-matchLet ((Keyword LET):b)    = Return b
-matchLet ((Keyword LETREC):b) = Return b
 
-matchIn :: [Token] -> Exc [Token]
-matchIn ((Keyword IN):b) = Return b
-matchIn (a:_)            = Raise ("found " ++ (show a) ++ ", expected `IN'")
-
-matchEnd :: [Token] -> Exc [Token]
-matchEnd ((Keyword END):b) = Return b
-matchEnd (a:_)             = Raise ("found " ++ (show a) ++ ", expected END")
-
-matchThen :: [Token] -> Exc [Token]
-matchThen ((Keyword THEN):b) = Return b
-matchThen (a:b)              = Raise ("found " ++ (show a) ++ ", expected THEN")
-
-matchElse :: [Token] -> Exc [Token]
-matchElse ((Keyword ELSE):b) = Return b
-matchElse (a:b)              = Raise ("found " ++ (show a) ++ ", expected ELSE")
+matchToken :: Token -> [Token] -> Exc [Token]
+matchToken token (t:rest) =
+    if t == token then return rest
+                  else Raise ("found " ++ (show t)
+                              ++ ", expected " ++ (show token))
 
 matchLeftParen :: [Token] -> Exc [Token]
-matchLeftParen ((Symbol LPAREN):b) = Return b
-matchLeftParen (a:b)               = Raise ("found " ++ (show a) ++ ", expected (")
+matchLeftParen = matchToken (Symbol LPAREN)
 
 matchRightParen :: [Token] -> Exc [Token]
-matchRightParen ((Symbol RPAREN):b) = Return b
-matchRightParen (a:b)               = Raise ("found " ++ (show a) ++ ", expected )")
-
-matchComma :: [Token] -> Exc [Token]
-matchComma ((Symbol COMMA):b) = Return  b
-matchComma (a:b)                = Raise ("found " ++ (show a) ++ ", expected ,")
-
-matchEquals :: [Token] -> Exc [Token]
-matchEquals ((Symbol EQUALS):b) = Return b
-matchEquals (a:b)               = Raise ("found " ++ (show a) ++ ", expected =")
-
-matchExpSequence :: [Token] -> Exc ([Token], [LKC])
-matchExpSequence tokens = do
-                            x <- matchLeftParen tokens
-                            (y, lkc) <- seqExp x
-                            z <- matchRightParen y
-                            return (z, lkc)
+matchRightParen = matchToken (Symbol RPAREN)
 
 matchBindingsAndBody :: [Token] -> Exc ([Token], [(LKC,LKC)], LKC)
 matchBindingsAndBody tokens = do (x, bindingsLkc) <- bind tokens
-                                 y <- matchIn x
+                                 y <- matchToken (Keyword IN) x
                                  (z, expLkc) <- exp y
-                                 w <- matchEnd z
+                                 w <- matchToken (Keyword END) z
                                  return (w, bindingsLkc, expLkc)
+
+unaryOperator :: (LKC -> LKC) -> Parser LKC
+unaryOperator ctor b = do x <- matchLeftParen b
+                          (y, param) <- exp x
+                          z <- matchRightParen y
+                          return (z, ctor param)
+
+binaryOperator :: (LKC -> LKC -> LKC) -> Parser LKC
+binaryOperator ctor b = do x <- matchLeftParen b
+                           (y, param1) <- exp x
+                           z <- matchToken (Symbol COMMA) y
+                           (w, param2) <- exp z
+                           ww <- matchRightParen w
+                           return (ww, ctor param1 param2)
 
 {- Parser.
  - Translates a tokenized program into its representation as an
@@ -110,19 +96,17 @@ prog (a:_) = Raise ("found " ++ (show a) ++ ", expected `LET' or `LETREC'")
 
 {- Bind production -}
 bind :: [Token] -> Exc ([Token], [(LKC,LKC)])
-bind ((Id a):b) = do
-        x <- matchEquals b
-        (y, expLkc) <- exp x
-        (z, funXLkc) <- funX y
-        return (z, (VAR a, expLkc):funXLkc)
+bind ((Id a):b) = do x <- matchToken (Symbol EQUALS) b
+                     (y, expLkc) <- exp x
+                     (z, funXLkc) <- funX y
+                     return (z, (VAR a, expLkc):funXLkc)
 bind (a:_) = Raise ("found " ++ (show a) ++ ", expected identifier")
 
-funX :: [Token] -> Exc ([Token], [(LKC,LKC)])
-funX ((Keyword AND):b)  = bind b
-funX a@((Keyword IN):b) = Return (a, [])
-funX (a:_)              = Raise ("found " ++ (show a) ++ " after binders")
+funX :: Parser [(LKC, LKC)]
+funX ((Keyword AND):tokens)  = bind tokens
+funX tokens = Return (tokens, [])
 
-exp :: [Token] -> Exc ([Token], LKC)
+exp :: Parser LKC
 exp tokens@((Keyword LET):_)    = prog tokens
 exp tokens@((Keyword LETREC):_) = prog tokens
 exp ((Keyword LAMBDA):b) = do
@@ -131,122 +115,83 @@ exp ((Keyword LAMBDA):b) = do
         z <- matchRightParen y
         (w, expLkc) <- exp z
         return (w, LAMBDAC paramsLkc expLkc)
-exp ((Operator CONS):b)  = do
-        (z, seqExpLkc) <- matchExpSequence b
-        if length seqExpLkc == 2
-            then return (z, CONSC (head seqExpLkc) (last seqExpLkc))
-            else Raise ("found " ++ (show . length) seqExpLkc
-                ++ " arguments to CONS, expected 2")
-exp ((Operator LEQ):b) = do
-        (z, seqExpLkc) <- matchExpSequence b
-        if length seqExpLkc == 2
-            then return (z, LEQC (head seqExpLkc) (last seqExpLkc))
-            else Raise ("found " ++ (show . length) seqExpLkc
-                 ++ " arguments to LEQ, expected 2")
-exp ((Operator EQ):b) = do
-        (z, seqExpLkc) <- matchExpSequence b
-        if length seqExpLkc == 2
-            then return (z, EQC (head seqExpLkc) (last seqExpLkc))
-            else Raise ("found " ++ (show . length) seqExpLkc
-                 ++ " arguments to EQ, expected 2")
-exp ((Operator CAR):b) = do
-        (z, seqExpLkc) <- matchExpSequence b
-        if length seqExpLkc == 1
-            then return (z, CARC (head seqExpLkc))
-            else Raise ("found " ++ (show . length) seqExpLkc
-                 ++ " arguments to CAR, expected 1")
-exp ((Operator CDR):b) = do
-        (z, seqExpLkc) <- matchExpSequence b
-        if length seqExpLkc == 1
-            then return (z, CDRC (head seqExpLkc))
-            else Raise ("found " ++ (show . length) seqExpLkc
-                 ++ " arguments to CDR, expected 1")
-exp ((Operator ATOM):b) = do
-        x <- matchLeftParen b
-        (y, seqExpLkc) <- seqExp x
-        z <- matchRightParen y
-        if length seqExpLkc == 1
-            then return (z, ATOMC (head seqExpLkc))
-            else Raise ("found " ++ (show . length) seqExpLkc
-                 ++ " arguments to ATOM, expected 1")
-exp ((Keyword IF):b) = do
-        (x, guardLkc) <- exp b
-        y <- matchThen x
-        (z, thenLkc) <- exp y
-        w <- matchElse z
-        (ww, elseLkc) <- exp w
-        return (ww, IFC guardLkc thenLkc elseLkc)
+exp ((Operator CONS):b)         = binaryOperator CONSC b
+exp ((Operator LEQ):b)          = binaryOperator LEQC b
+exp ((Operator EQ):b)           = binaryOperator EQC b
+exp ((Operator CAR):b)          = unaryOperator CARC b
+exp ((Operator CDR):b)          = unaryOperator CDRC b
+exp ((Operator ATOM):b)         = unaryOperator ATOMC b
+exp ((Keyword IF):b)            = do (x, guard) <- exp b
+                                     y <- matchToken (Keyword THEN) x
+                                     (z, thenBranch) <- exp y
+                                     w <- matchToken (Keyword ELSE) z
+                                     (k, elseBranch) <- exp w
+                                     return (k, IFC guard thenBranch elseBranch)
 exp x =  expA x
 
-expA :: [Token] -> Exc ([Token], LKC)
-expA a = do
-         (x, tLkc) <- funT a
-         e1 x tLkc
+{- Non-terminal ExpA -}
+expA :: Parser LKC
+expA a = do (x, tLkc) <- funT a
+            e1 tLkc x
 
 {- Non-terminal E1 -}
-e1 :: [Token] -> LKC -> Exc ([Token], LKC)
-e1 ((Symbol PLUS):b) inhLkc  = do
+e1 :: LKC -> Parser LKC
+e1 inhLkc ((Symbol PLUS):b)  = do
                                  (x, tLkc) <- funT b
-                                 e1 x (ADD inhLkc tLkc)
-e1 ((Symbol MINUS):b) inhLkc = do
+                                 e1 (ADD inhLkc tLkc) x
+e1 inhLkc ((Symbol MINUS):b) = do
                                  (x, tLkc) <- funT b
-                                 e1 x (SUB inhLkc tLkc)
-e1 tokens inhLkc             = Return (tokens, inhLkc) -- epsilon production
+                                 e1 (SUB inhLkc tLkc) x
+e1 inhLkc tokens             = Return (tokens, inhLkc) -- epsilon production
 
 {- Non-terminal T -}
-funT :: [Token] -> Exc ([Token], LKC)
-funT a = do
-         (x, fLkc) <- funF a
-         (y, t1Lkc) <- funT1 x fLkc
-         return (y, t1Lkc)
+funT :: Parser LKC
+funT tokens = do (x, fLkc) <- funF tokens
+                 (y, t1Lkc) <- funT1 fLkc x
+                 return (y, t1Lkc)
 
 {- Non-terminal T1 -}
-funT1 :: [Token] -> LKC -> Exc ([Token], LKC)
-funT1 ((Symbol TIMES):b) inhLkc    = do
-                                       (x, fLkc) <- funF b
-                                       funT1 x (MULT inhLkc fLkc)
-funT1 ((Symbol DIVISION):b) inhLkc = do
-                                       (x, fLkc) <- funF b
-                                       funT1 x (DIV inhLkc fLkc)
-funT1 x inhLkc                     = Return (x, inhLkc) -- epsilon production
+funT1 :: LKC -> Parser LKC
+funT1 inhLkc ((Symbol TIMES):b) = do (x, fLkc) <- funF b
+                                     funT1 (MULT inhLkc fLkc) x
+funT1 inhLkc ((Symbol DIVISION):b) = do (x, fLkc) <- funF b
+                                        funT1 (DIV inhLkc fLkc) x
+funT1 inhLkc x = Return (x, inhLkc) -- epsilon production
 
 {- Non-terminal F -}
-funF :: [Token] -> Exc ([Token], LKC)
-funF ((Id a):b) = funY b a
-funF (Nil:b) = Return (b, NIL)
-funF ((Number n):b) = Return (b, NUM n)
-funF ((Bool bb):b) = Return (b, BOO bb)
-funF ((String str):b) = Return (b, STRI str)
-funF ((Symbol LPAREN):b) = do
-                             (x, expALkc) <- expA b
-                             y <- matchRightParen x
-                             return (y, expALkc)
+funF :: Parser LKC
+funF ((Id varId):tokens)      = funY varId tokens
+funF (Nil:tokens)             = Return (tokens, NIL)
+funF ((Number n):tokens)      = Return (tokens, NUM n)
+funF ((Bool bb):tokens)       = Return (tokens, BOO bb)
+funF ((String str):tokens)    = Return (tokens, STRI str)
+funF ((Symbol LPAREN):tokens) = do (x, expALkc) <- expA tokens
+                                   y <- matchRightParen x
+                                   return (y, expALkc)
 funF (a:_) = Raise ("expected expression, found " ++ (show a))
 
 {- Non-terminal Y -}
-funY :: [Token] -> String -> Exc ([Token], LKC)
-funY ((Symbol LPAREN):b) varId = do
-                                  (x, seqExpLkc) <- seqExp b
-                                  y <- matchRightParen x
-                                  return (y, CALL (VAR varId) seqExpLkc)
-funY x varId = return (x, VAR varId)
+funY :: String -> Parser LKC
+funY varId ((Symbol LPAREN):tokens) = do (x, seq) <- seqExp tokens
+                                         y <- matchRightParen x
+                                         return (y, CALL (VAR varId) seq)
+funY varId x = return (x, VAR varId)  -- epsilon production
+
+expSequence :: Parser [LKC]
+expSequence tokens = do (x, expression) <- exp tokens
+                        (y, sequence) <- seqExp2 x
+                        return (y, expression : sequence)
 
 {- Non-terminal SeqExp -}
-seqExp :: [Token] -> Exc ([Token], [LKC])
-seqExp a@((Symbol RPAREN):b) = Return (a, [])  -- epsilon production
-seqExp a = do
-             (x, expLkc) <- exp a
-             (y, seqLkc) <- seqExp2 x
-             return (y, expLkc : seqLkc)
+seqExp :: Parser [LKC]
+seqExp tokens@(Symbol RPAREN : _) = Return (tokens, [])  -- epsilon production
+seqExp tokens = expSequence tokens
 
-seqExp2 :: [Token] -> Exc ([Token], [LKC])
-seqExp2 ((Symbol COMMA):b) = do (x, expLkc) <- exp b
-                                (y, seqExp2Lkc) <- seqExp2 x
-                                return (y, expLkc : seqExp2Lkc)
-seqExp2 a = Return (a, [])
+seqExp2 :: Parser [LKC]
+seqExp2 ((Symbol COMMA):tokens) = expSequence tokens
+seqExp2 tokens = Return (tokens, [])
 
-seqVar :: [Token] -> Exc ([Token], [LKC])
-seqVar ((Id a):b) = do
-                      (x, seqLkc) <- seqVar b
-                      return (x, (VAR a):seqLkc)
+seqVar :: Parser [LKC]
+seqVar ((Id a):tokens) = do (x, sequence) <- seqVar tokens
+                            return (x, (VAR a):sequence)
 seqVar x = Return (x, [])

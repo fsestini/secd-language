@@ -1,10 +1,4 @@
-module Compiler (
-compile,
-Secdexpr(..),
-c,
-d
-)
-where
+module Compiler (compile, Secdexpr(..)) where
 
 import Lexer
 import SyntaxAnalyzer
@@ -12,24 +6,28 @@ import SyntaxAnalyzer
 data Secdexpr = Add | Sub |  Mult | Div | Rem | Eq | Leq | Car | Cdr | Cons
               | Atom | Join | Rtn | Stop | Push | Ap | Rap
               | Ld (Integer, Integer) | Ldc LKC | Sel [Secdexpr] [Secdexpr]
-              | Ldf [Secdexpr] deriving(Show, Eq)
+              | Ldf [Secdexpr]
+              deriving(Show, Eq)
 
--- funzioni per il calcolo dell'indirizzo di una variabile nell'ambiente
+type StaticEnvironment = [[LKC]]
+
+-- Calculate address of a variable in the specified static activation record
 positionInAr :: String -> [LKC] -> Integer
 positionInAr _ [] = error "positionInAr: variable not found"
 positionInAr x ((VAR z):y) = if z == x then 0 else 1 + (positionInAr x y)
 positionInAr _ _ = error "positionInAr: non-VAR element found"
 
--- Checks if a variable is defined in the specified activation record
+-- Checks if a variable is defined in the specified static activation record
 arContainsVar :: String -> [LKC] -> Bool
 arContainsVar _ [] = False
 arContainsVar x ((VAR z):y) = (x == z) || arContainsVar x y
 arContainsVar x _ = error ("found AR with non-VAR element " ++ x)
 
--- Returns (AR, offset) of a variable
+-- Returns (AR, offset) of a variable, that is, the location of a variable in
+-- the specified static environment
 location :: String -> [[LKC]] -> (Integer, Integer)
 location x l =
-    let searchLocation _ _ [] = error ("location non trova VAR " ++ x)
+    let searchLocation _ _ [] = error ("not in scope: " ++ x)
         searchLocation x count (n:m) = if arContainsVar x n
                                        then (count, positionInAr x n)
                                        else searchLocation x (count + 1) m
@@ -45,13 +43,19 @@ exprs :: [(a,b)] -> [b]
 exprs [] = []
 exprs((x,y):r) = y:(exprs r)
 
-complist:: [LKC]-> [[LKC]] -> [Secdexpr]->[Secdexpr]
+{- Compiles a list of LKC expressions by compiling each one and cons-ing the
+ - results.
+ - Expressions are compiled from last to first so that their runtime values
+ - appear with the first expression on top of the stack -}
+complist:: [LKC]-> StaticEnvironment -> [Secdexpr] -> [Secdexpr]
 complist [] _ c = (Ldc NIL):c
 complist (x:y) n c = complist y n (comp x n (Cons:c))
 
-comp:: LKC -> [[LKC]] -> [Secdexpr]->[Secdexpr]
+{- Compiles an expression 'e' with respect to a static environment 'n',
+ - and appends a string of code 'c' -}
+comp:: LKC -> StaticEnvironment -> [Secdexpr] -> [Secdexpr]
 comp e n c = case e of
-    (VAR x)                 -> ((Ld (location x n)):c)
+    (VAR x)                 -> (Ld (location x n)):c
     (NUM x)                 -> (Ldc (NUM x)):c
     (BOO x)                 -> (Ldc (BOO x)):c
     (STRI x)                -> (Ldc (STRI x)):c
@@ -70,21 +74,16 @@ comp e n c = case e of
     (IFC x y z)             -> let thenp = comp y n [Join]
                                    elsep = comp z n [Join]
                                in comp x n ((Sel thenp elsep):c)
-    (LAMBDAC par body)      -> (Ldf (comp body (par:n) [Rtn])):c
-    (LETC body bindings)    -> complist (exprs bindings) n
-                                    ((Ldf (comp body ((vars bindings):n) [Rtn])):(Ap:c))
-    (LETRECC body bindings) -> complist (exprs bindings) ((vars bindings):n)
-                                    (Push:(Ldf (comp body ((vars bindings):n) [Rtn])):(Rap:c))
+    (LAMBDAC params body)   -> (Ldf (comp body (params:n) [Rtn])):c
     (CALL id args)  -> complist args n (comp id n (Ap:c))
+    (LETC body bindings)    ->
+        complist (exprs bindings) n
+            ((Ldf (comp body ((vars bindings):n) [Rtn])):(Ap:c))
+    (LETRECC body bindings) ->
+        Push:(complist (exprs bindings) ((vars bindings):n)
+            ((Ldf (comp body ((vars bindings):n) [Rtn])):(Rap:c)))
     _               -> []
 
---esempi di prova
-
-c="letrec  FACT = lambda ( X ) if  eq ( X, 0 ) then 1 else  X*FACT(  X - 1 ) and G = lambda ( H L ) if  eq ( nil, L ) then L else cons( H(car( L ) ), G ( H, cdr ( L ) )) in G ( FACT, cons(1 ,cons(2, cons(3, nil))) ) end $"
-
-d= "let x= 4+1 and y= 6 in x*3 + y * 2* x + x*y end $"
-simple = "let x = 1 and y = 2 in x + y end $"
-lexed = lexi simple
-(Return (_, lkced)) = prog lexed
-
+-- Utility function
+compile :: LKC -> [Secdexpr]
 compile x = comp x [] []

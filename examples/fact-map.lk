@@ -1,0 +1,5 @@
+letrec fact = lambda (x) if eq(x,0) then 1 else x*fact(x-1)
+       and g = lambda (h l) if eq(nil,l)
+                            then l
+                            else cons(h(car(l)),g(h,cdr(l)))
+in g(fact, cons(6, cons(7, cons(8, nil)))) end $
